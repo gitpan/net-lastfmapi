@@ -5,26 +5,26 @@ use v5.10;
 use LWP::UserAgent;
 use Digest::MD5 'md5_hex';
 use JSON::XS;
+use YAML::Syck;
 use File::Slurp;
 use File::Path 'make_path';
 use URI;
 use Exporter 'import';
-our @EXPORT = ('lastfm');
+our @EXPORT = ('lastfm', 'lastfm_config', 'lastfm_iter');
 use Carp;
 
-our $VERSION = 0.3;
+our $VERSION = 0.4;
 our $url = 'http://ws.audioscrobbler.com/2.0/';
 our $api_key = 'dfab9b1c7357c55028c84b9a8fb68880';
 our $secret = 'd004c86dcfa8ef4c3977b04f558535f2';
 our $session_key; # see load_save_sessionkey()
 our $ua = new LWP::UserAgent(agent => "Net::LastFMAPI/$VERSION");
 our $username; # not important
-
-our $json = 0;
+our $xml = 0;
 our $cache = 0;
-
 our $cache_dir = "$ENV{HOME}/.net-lastfmapi-cache/";
 our $sk_symlink = "$ENV{HOME}/.net-lastfmapi-sessionkey";
+
 sub load_save_sessionkey { # see get_session_key()
     my $key = shift;
     if ($key) {
@@ -35,6 +35,19 @@ sub load_save_sessionkey { # see get_session_key()
     }
     $session_key = $key;
 }
+
+sub lastfm_config {
+    my %configs = @_;
+    for my $k (qw{api_key secret session_key ua xml cache cache_dir sk_symlink}) {
+        my $v = delete $configs{$k};
+        if (defined $v) {
+            no strict 'refs';
+            ${$k} = $v;
+        }
+    }
+    croak "invalid config items: ".join(", ", keys %configs) if keys %configs;
+}
+
 sub dumpfile {
     my $file = shift;
     my $json = encode_json(shift);
@@ -47,140 +60,143 @@ sub loadfile {
 }
 #{{{
 our $methods = {
-    'album.addtags' => {auth => 1, post => 1, signed => 1},
-    'album.getbuylinks' => {},
-    'album.getinfo' => {},
-    'album.getshouts' => {},
-    'album.gettags' => {auth => 1, signed => 1},
-    'album.gettoptags' => {},
-    'album.removetag' => {auth => 1, post => 1, signed => 1},
-    'album.search' => {},
-    'album.share' => {auth => 1, post => 1, signed => 1},
-    'artist.addtags' => {auth => 1, post => 1, signed => 1},
-    'artist.getcorrection' => {},
-    'artist.getevents' => {},
-    'artist.getimages' => {},
-    'artist.getinfo' => {},
-    'artist.getpastevents' => {},
-    'artist.getpodcast' => {},
-    'artist.getshouts' => {},
-    'artist.getsimilar' => {},
-    'artist.gettags' => {auth => 1, signed => 1},
-    'artist.gettopalbums' => {},
-    'artist.gettopfans' => {},
-    'artist.gettoptags' => {},
-    'artist.gettoptracks' => {},
-    'artist.removetag' => {auth => 1, post => 1, signed => 1},
-    'artist.search' => {},
-    'artist.share' => {auth => 1, post => 1, signed => 1},
-    'artist.shout' => {auth => 1, post => 1, signed => 1},
-    'auth.getmobilesession' => {signed => 1},
-    'auth.getsession' => {signed => 1},
-    'auth.gettoken' => {signed => 1},
-    'chart.gethypedartists' => {},
-    'chart.gethypedtracks' => {},
-    'chart.getlovedtracks' => {},
-    'chart.gettopartists' => {},
-    'chart.gettoptags' => {},
-    'chart.gettoptracks' => {},
-    'event.attend' => {auth => 1, post => 1, signed => 1},
-    'event.getattendees' => {},
-    'event.getinfo' => {},
-    'event.getshouts' => {},
-    'event.share' => {auth => 1, post => 1, signed => 1},
-    'event.shout' => {auth => 1, post => 1, signed => 1},
-    'geo.getevents' => {},
-    'geo.getmetroartistchart' => {},
-    'geo.getmetrohypeartistchart' => {},
-    'geo.getmetrohypetrackchart' => {},
-    'geo.getmetrotrackchart' => {},
-    'geo.getmetrouniqueartistchart' => {},
-    'geo.getmetrouniquetrackchart' => {},
-    'geo.getmetroweeklychartlist' => {},
-    'geo.getmetros' => {},
-    'geo.gettopartists' => {},
-    'geo.gettoptracks' => {},
-    'group.gethype' => {},
-    'group.getmembers' => {},
-    'group.getweeklyalbumchart' => {},
-    'group.getweeklyartistchart' => {},
-    'group.getweeklychartlist' => {},
-    'group.getweeklytrackchart' => {},
-    'library.addalbum' => {auth => 1, post => 1, signed => 1},
-    'library.addartist' => {auth => 1, post => 1, signed => 1},
-    'library.addtrack' => {auth => 1, post => 1, signed => 1},
-    'library.getalbums' => {},
-    'library.getartists' => {},
-    'library.gettracks' => {},
-    'library.removealbum' => {auth => 1, post => 1, signed => 1},
-    'library.removeartist' => {auth => 1, post => 1, signed => 1},
-    'library.removescrobble' => {auth => 1, post => 1, signed => 1},
-    'library.removetrack' => {auth => 1, post => 1, signed => 1},
-    'playlist.addtrack' => {auth => 1, post => 1, signed => 1},
-    'playlist.create' => {auth => 1, post => 1, signed => 1},
-    'radio.getplaylist' => {auth => 1, signed => 1},
-    'radio.search' => {},
-    'radio.tune' => {auth => 1, post => 1, signed => 1},
-    'tag.getinfo' => {},
-    'tag.getsimilar' => {},
-    'tag.gettopalbums' => {},
-    'tag.gettopartists' => {},
-    'tag.gettoptags' => {},
-    'tag.gettoptracks' => {},
-    'tag.getweeklyartistchart' => {},
-    'tag.getweeklychartlist' => {},
-    'tag.search' => {},
-    'tasteometer.compare' => {},
-    'tasteometer.comparegroup' => {},
-    'track.addtags' => {auth => 1, post => 1, signed => 1},
-    'track.ban' => {auth => 1, post => 1, signed => 1},
-    'track.getbuylinks' => {},
-    'track.getcorrection' => {},
-    'track.getfingerprintmetadata' => {},
-    'track.getinfo' => {},
-    'track.getshouts' => {},
-    'track.getsimilar' => {},
-    'track.gettags' => {auth => 1, signed => 1},
-    'track.gettopfans' => {},
-    'track.gettoptags' => {},
-    'track.love' => {auth => 1, post => 1, signed => 1},
-    'track.removetag' => {auth => 1, post => 1, signed => 1},
-    'track.scrobble' => {auth => 1, post => 1, signed => 1},
-    'track.search' => {},
-    'track.share' => {auth => 1, post => 1, signed => 1},
-    'track.unban' => {auth => 1, post => 1, signed => 1},
-    'track.unlove' => {auth => 1, post => 1, signed => 1},
-    'track.updatenowplaying' => {auth => 1, post => 1, signed => 1},
-    'user.getartisttracks' => {},
-    'user.getbannedtracks' => {},
-    'user.getevents' => {},
-    'user.getfriends' => {},
-    'user.getinfo' => {auth => 1},
-    'user.getlovedtracks' => {},
-    'user.getneighbours' => {},
-    'user.getnewreleases' => {},
-    'user.getpastevents' => {},
-    'user.getpersonaltags' => {},
-    'user.getplaylists' => {},
-    'user.getrecentstations' => {auth => 1, signed => 1},
-    'user.getrecenttracks' => {},
-    'user.getrecommendedartists' => {auth => 1, signed => 1},
-    'user.getrecommendedevents' => {auth => 1, signed => 1},
-    'user.getshouts' => {},
-    'user.gettopalbums' => {},
-    'user.gettopartists' => {},
-    'user.gettoptags' => {},
-    'user.gettoptracks' => {},
-    'user.getweeklyalbumchart' => {},
-    'user.getweeklyartistchart' => {},
-    'user.getweeklychartlist' => {},
-    'user.getweeklytrackchart' => {},
-    'user.shout' => {auth => 1, post => 1, signed => 1},
-    'venue.getevents' => {},
-    'venue.getpastevents' => {},
-    'venue.search' => {},
+    'album.addtags' => {auth => 1, post => 1, signed => 1, id => 302},
+    'album.getbuylinks' => {id => 429},
+    'album.getinfo' => {id => 290},
+    'album.getshouts' => {page => 1, id => 450},
+    'album.gettags' => {auth => 1, signed => 1, id => 317},
+    'album.gettoptags' => {id => 438},
+    'album.removetag' => {auth => 1, post => 1, signed => 1, id => 314},
+    'album.search' => {page => 1, id => 357},
+    'album.share' => {auth => 1, post => 1, signed => 1, id => 436},
+    'artist.addtags' => {auth => 1, post => 1, signed => 1, id => 303},
+    'artist.getcorrection' => {id => 446},
+    'artist.getevents' => {page => 1, id => 117},
+    'artist.getimages' => {page => 1, id => 407},
+    'artist.getinfo' => {id => 267},
+    'artist.getpastevents' => {page => 1, id => 428},
+    'artist.getpodcast' => {id => 118},
+    'artist.getshouts' => {page => 1, id => 397},
+    'artist.getsimilar' => {id => 119},
+    'artist.gettags' => {auth => 1, signed => 1, id => 318},
+    'artist.gettopalbums' => {page => 1, id => 287},
+    'artist.gettopfans' => {id => 310},
+    'artist.gettoptags' => {id => 288},
+    'artist.gettoptracks' => {page => 1, id => 277},
+    'artist.removetag' => {auth => 1, post => 1, signed => 1, id => 315},
+    'artist.search' => {page => 1, id => 272},
+    'artist.share' => {auth => 1, post => 1, signed => 1, id => 306},
+    'artist.shout' => {auth => 1, post => 1, signed => 1, id => 408},
+    'auth.getmobilesession' => {signed => 1, id => 266},
+    'auth.getsession' => {signed => 1, id => 125},
+    'auth.gettoken' => {signed => 1, id => 265},
+    'chart.gethypedartists' => {page => 1, id => 493},
+    'chart.gethypedtracks' => {page => 1, id => 494},
+    'chart.getlovedtracks' => {page => 1, id => 495},
+    'chart.gettopartists' => {page => 1, id => 496},
+    'chart.gettoptags' => {page => 1, id => 497},
+    'chart.gettoptracks' => {page => 1, id => 498},
+    'event.attend' => {auth => 1, post => 1, signed => 1, id => 307},
+    'event.getattendees' => {page => 1, id => 391},
+    'event.getinfo' => {id => 292},
+    'event.getshouts' => {page => 1, id => 399},
+    'event.share' => {auth => 1, post => 1, signed => 1, id => 350},
+    'event.shout' => {auth => 1, post => 1, signed => 1, id => 409},
+    'geo.getevents' => {page => 1, id => 270},
+    'geo.getmetroartistchart' => {id => 421},
+    'geo.getmetrohypeartistchart' => {id => 420},
+    'geo.getmetrohypetrackchart' => {id => 422},
+    'geo.getmetrotrackchart' => {id => 423},
+    'geo.getmetrouniqueartistchart' => {id => 424},
+    'geo.getmetrouniquetrackchart' => {id => 425},
+    'geo.getmetroweeklychartlist' => {id => 426},
+    'geo.getmetros' => {id => 435},
+    'geo.gettopartists' => {page => 1, id => 297},
+    'geo.gettoptracks' => {page => 1, id => 298},
+    'group.gethype' => {id => 259},
+    'group.getmembers' => {page => 1, id => 379},
+    'group.getweeklyalbumchart' => {id => 293},
+    'group.getweeklyartistchart' => {id => 294},
+    'group.getweeklychartlist' => {id => 295},
+    'group.getweeklytrackchart' => {id => 296},
+    'library.addalbum' => {auth => 1, post => 1, signed => 1, id => 370},
+    'library.addartist' => {auth => 1, post => 1, signed => 1, id => 371},
+    'library.addtrack' => {auth => 1, post => 1, signed => 1, id => 372},
+    'library.getalbums' => {page => 1, id => 321},
+    'library.getartists' => {page => 1, id => 322},
+    'library.gettracks' => {page => 1, id => 323},
+    'library.removealbum' => {auth => 1, post => 1, signed => 1, id => 523},
+    'library.removeartist' => {auth => 1, post => 1, signed => 1, id => 524},
+    'library.removescrobble' => {auth => 1, post => 1, signed => 1, id => 525},
+    'library.removetrack' => {auth => 1, post => 1, signed => 1, id => 526},
+    'playlist.addtrack' => {auth => 1, post => 1, signed => 1, id => 337},
+    'playlist.create' => {auth => 1, post => 1, signed => 1, id => 365},
+    'radio.getplaylist' => {auth => 1, signed => 1, id => 256},
+    'radio.search' => {id => 418},
+    'radio.tune' => {auth => 1, post => 1, signed => 1, id => 160},
+    'tag.getinfo' => {id => 452},
+    'tag.getsimilar' => {id => 311},
+    'tag.gettopalbums' => {page => 1, id => 283},
+    'tag.gettopartists' => {page => 1, id => 284},
+    'tag.gettoptags' => {id => 276},
+    'tag.gettoptracks' => {page => 1, id => 285},
+    'tag.getweeklyartistchart' => {id => 358},
+    'tag.getweeklychartlist' => {id => 359},
+    'tag.search' => {page => 1, id => 273},
+    'tasteometer.compare' => {id => 258},
+    'tasteometer.comparegroup' => {id => 500},
+    'track.addtags' => {auth => 1, post => 1, signed => 1, id => 304},
+    'track.ban' => {auth => 1, post => 1, signed => 1, id => 261},
+    'track.getbuylinks' => {id => 431},
+    'track.getcorrection' => {id => 447},
+    'track.getfingerprintmetadata' => {id => 441},
+    'track.getinfo' => {id => 356},
+    'track.getshouts' => {page => 1, id => 453},
+    'track.getsimilar' => {id => 319},
+    'track.gettags' => {auth => 1, signed => 1, id => 320},
+    'track.gettopfans' => {id => 312},
+    'track.gettoptags' => {id => 289},
+    'track.love' => {auth => 1, post => 1, signed => 1, id => 260},
+    'track.removetag' => {auth => 1, post => 1, signed => 1, id => 316},
+    'track.scrobble' => {auth => 1, post => 1, signed => 1, id => 443},
+    'track.search' => {page => 1, id => 286},
+    'track.share' => {auth => 1, post => 1, signed => 1, id => 305},
+    'track.unban' => {auth => 1, post => 1, signed => 1, id => 449},
+    'track.unlove' => {auth => 1, post => 1, signed => 1, id => 440},
+    'track.updatenowplaying' => {auth => 1, post => 1, signed => 1, id => 454},
+    'user.getartisttracks' => {page => 1, id => 432},
+    'user.getbannedtracks' => {page => 1, id => 448},
+    'user.getevents' => {page => 1, id => 291},
+    'user.getfriends' => {page => 1, id => 263},
+    'user.getinfo' => {auth => 1, id => 344},
+    'user.getlovedtracks' => {page => 1, id => 329},
+    'user.getneighbours' => {id => 264},
+    'user.getnewreleases' => {id => 444},
+    'user.getpastevents' => {page => 1, id => 343},
+    'user.getpersonaltags' => {page => 1, id => 455},
+    'user.getplaylists' => {id => 313},
+    'user.getrecentstations' => {auth => 1, signed => 1, page => 1, id => 414},
+    'user.getrecenttracks' => {page => 1, id => 278},
+    'user.getrecommendedartists' => {auth => 1, signed => 1, page => 1, id => 388},
+    'user.getrecommendedevents' => {auth => 1, signed => 1, page => 1, id => 375},
+    'user.getshouts' => {page => 1, id => 401},
+    'user.gettopalbums' => {page => 1, id => 299},
+    'user.gettopartists' => {page => 1, id => 300},
+    'user.gettoptags' => {id => 123},
+    'user.gettoptracks' => {page => 1, id => 301},
+    'user.getweeklyalbumchart' => {id => 279},
+    'user.getweeklyartistchart' => {id => 281},
+    'user.getweeklychartlist' => {id => 280},
+    'user.getweeklytrackchart' => {id => 282},
+    'user.shout' => {auth => 1, post => 1, signed => 1, id => 411},
+    'venue.getevents' => {id => 394},
+    'venue.getpastevents' => {page => 1, id => 395},
+    'venue.search' => {page => 1, id => 396},
 };
 #}}}
+our %last_params;
+our $last_response;
+our %last_response_meta;
 sub lastfm {
     my ($method, @params) = @_;
     $method = lc($method);
@@ -217,17 +233,21 @@ sub lastfm {
     }
     $params{method} = $method;
     $params{api_key} = $api_key;
-    $params{format} ||= "json" if $json;
+    $params{format} = "json" unless $params{format} || $xml;
     delete $params{format} if $params{format} && $params{format} eq "xml";
 
     unless (exists $methods->{$method}) {
         carp "method $method is not known to Net::LastFMAPI"
+    }
+    elsif (defined $params{page} && !$methods->{$method}->{page}) {
+        carp "method $method is not known to be paginated, but hey"
     }
 
     sessionise(\%params);
 
     sign(\%params);
 
+    %last_params = %params;
     my $res;
     if ($methods->{$method}->{post}) {
         $res = $ua->post($url, Content => \%params);
@@ -242,23 +262,99 @@ sub lastfm {
     my $content = $res->decoded_content;
     unless ($res->is_success &&
         ($params{format} ne "xml" || $content =~ /<lfm status="ok">/)) {
-        no warnings "once";
+        EARORR:
+        $DB::single = 0;
         $DB::single = 1;
-        my $consider;
+        my $consider = "";
         if ($content =~ /Invalid session key - Please re-authenticate/) {
             $consider = "setting NET_LASTFMAPI_REAUTH=1 to re-authenticate";
         }
-        croak "Something went wrong:\n$content".
-            ($consider?"\n\nConsider $consider":"");
-    }
+        $consider .= ($consider ? "\n or " : "")."reading the docs: "
+            ."http://www.last.fm/api/show/?service=$methods->{$method}->{id}"
+            if $methods->{$method};
+        croak "Something went wrong:\n$content\n".
+            ($consider?"\nConsider $consider":"");
+        }
 
     if ($params{format} eq "json") {
         $content = decode_json($content);
+        if ($content->{error}) {
+            $content = Dump($content);
+            goto EARORR;
+        }
     }
     if ($cache) {
         dumpfile($cache, {content => $content});
     }
-    return $content;
+    $last_response = $content;
+    if (wantarray) {
+        return extract_rows($content);
+    }
+    else {
+        return $content;
+    }
+}
+
+sub extract_rows {
+    if (!$last_params{format}) {
+        croak "returning rows from xml is not supported";
+    }
+    my $rs = $last_response;
+    say Dump($rs);
+    my @rk = keys %$rs;
+    my $r = $rs->{$rk[0]};
+    my @ks = sort keys %$r;
+    unless (@rk == 1 && @ks == 2 && $ks[0] eq '@attr') {
+        carp "extracting rows may be broken";
+        if (defined $r->{'#text'} && $r->{'#text'} =~ /^\s+$/
+            && defined $r->{total} && $r->{total} == 0) { # no rows
+            return ();
+        };
+    }
+    %last_response_meta = %{ $r->{$ks[0]} };
+    my $rows = $r->{$ks[1]};
+    if (ref $rows ne "ARRAY") {
+        # schemaless translation of xml to data creates these cases
+        if (ref $rows eq "HASH") { # 1 row
+            $rows = [ $rows ];
+        }
+        elsif ($rows =~ /^\s+$/) { # no rows
+            $rows = [];
+            carp "got whitespacey string instead of empty row array, this happens"
+        }
+        else {
+            carp "not an array of rows... '$rows' returning ()";
+        }
+    }
+    return @$rows;
+}
+
+sub lastfm_iter {
+    my @rows = lastfm(@_, page => 1);
+    my $params = { %last_params };
+    if (!$params->{format}) {
+        croak "paginating xml is not supported";
+    }
+    if (@rows == 0) {
+        return sub { };
+    }
+    my $page = $last_response_meta{page};
+    my $totalpages = $last_response_meta{totalPages};
+    my $next_page = sub {
+        return () if $page++ >= $totalpages;
+        say "page $page";
+        my %params = %$params;
+        $params{page} = $page;
+        my $method = delete $params{method};
+        my @rows = lastfm($method, %params);
+        return @rows;
+    };
+    return sub {
+        unless (@rows) {
+            push @rows, $next_page->();
+        }
+        return shift @rows;
+    }
 }
 
 sub sessionise {
@@ -315,7 +411,8 @@ sub talk_authorisation {
 sub sign {
     my $params = shift;
     return unless $methods->{$params->{method}}->{signed};
-    my $jumble = join "", map { $_ => $params->{$_} } sort keys %$params;
+    my $jumble = join "", map { $_ => $params->{$_} }
+        grep { !($_ eq "format" || $_ eq "callback") } sort keys %$params;
     my $hash = md5_hex($jumble.$secret);
     $params->{api_sig} = $hash;
 }
@@ -345,10 +442,7 @@ Net::LastFMAPI - LastFM API 2.0
 =head1 SYNOPSIS
 
   use Net::LastFMAPI;
-  my $xml = lastfm("artist.getSimilar", artist => "Robbie Basho");
-
-  $Net::LastFMAPI::json = 1;
-  my $data = lastfm(...); # decodes it for you
+  my $perl_data = lastfm("artist.getSimilar", artist => "Robbie Basho");
 
   # sets up a session/gets authorisation when needed for write actions:
   my $res = lastfm(
@@ -357,7 +451,26 @@ Net::LastFMAPI - LastFM API 2.0
       track => "Wounded Knee Soliloquy",
       timestamp => time(),
   );
-  $success = $res =~ m{<scrobbles accepted="1"};
+  $success = $res->{scrobbles}->{'@attr'}->{accepted} == 1;
+
+  my $xml = lastfm(...); # with config value: xml => 1
+  my $xml = lastfm(..., format => "xml");
+  $success = $xml =~ m{<scrobbles accepted="1"};
+
+  # paginated data can be iterated through per row
+  my $iter = lastfm_iter("artist.getTopTracks", artist => "John Fahey");
+  while (my $row = $iter->()) {
+      my $whole_response = $Net::LastFMAPI::last_response;
+      say $row->{playcount} .": ". $row->name;
+  }
+
+  # wantarray? tries to extract the rows of data for you
+  my @rows = lastfm(...);
+
+  # see also:
+  # bin/cmd.pl album.getInfo artist=Laddio Bolocko album=As If In Real Time
+  # bin/scrobble.pl Artist - Track
+  # bin/portablog-scrobbler.pl
 
 =head1 DESCRIPTION
 
@@ -366,6 +479,14 @@ Makes requests to http://ws.audioscrobbler.com/2.0/ and returns the result.
 Takes care of POSTing to write methods, doing authorisation when needed.
 
 Dies if something went obviously wrong.
+
+Can return xml if you like, defaults to returning perl data/requesting json.
+Not all methods support JSON. Beware of "@attr" and empty elements turned into
+whitespace strings instead of empty arrays, single elements turned into a hash
+instead of an array of one hash.
+
+The below configurables can be set by k => v hash to C<lastfm_config> if you
+prefer.
 
 =head1 THE SESSION KEY
 
@@ -382,15 +503,13 @@ probably fine.
 Consider altering the subroutines B<talk_authentication>, B<load_save_sessionkey>,
 or simply setting the B<$Net::LastFMAPI::session_key> before needing it.
 
-=head1 RETURN PERL DATA
+=head1 RETURN XML
 
-  $Net::LastFMAPI::json = 1
-  
-This will automatically add B<format =E<gt> "json"> to every request B<and decode
-the result> into perl data for you.
+  $Net::LastFMAPI::xml = 1
 
-Not all methods support JSON. Beware of "@attr" and empty elements turned into
-whitespace strings instead of empty arrays.
+This will return an xml string to you. You can also set B<format =E<gt> "xml">
+for a particular request. Apparently, not all methods support JSON. For casual
+hacking, though, getting perl data is much more convenient.
 
 =head1 CACHING
 
@@ -399,6 +518,16 @@ whitespace strings instead of empty arrays.
   $Net::LastFMAPI::cache_dir = "$ENV{HOME}/.net-lastfmapi-cache/"
 
 Does caching. Default cache directory is shown. Good for development.
+
+=head1 PAGINATION
+
+  my $iter = lastfm_iter(...);
+  while (my $row = $iter->()) {
+      ...
+  }
+
+Will attempt to extract rows from a response, passing you one at a time,
+keeping going into the next page, and the next...
 
 =head1 SEE ALSO
 
