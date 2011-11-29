@@ -8,6 +8,7 @@ use JSON::XS;
 use YAML::Syck;
 use File::Slurp;
 use File::Path 'make_path';
+use File::HomeDir 'my_home';
 use URI;
 use Exporter 'import';
 our @EXPORT = ('lastfm', 'lastfm_config', 'lastfm_iter');
@@ -22,8 +23,8 @@ our $ua = new LWP::UserAgent(agent => "Net::LastFMAPI/$VERSION");
 our $username; # not important
 our $xml = 0;
 our $cache = 0;
-our $cache_dir = "$ENV{HOME}/.net-lastfmapi-cache/";
-our $sk_symlink = "$ENV{HOME}/.net-lastfmapi-sessionkey";
+our $cache_dir = my_home()."/.net-lastfmapi-cache/";
+our $sk_symlink = my_home()."/.net-lastfmapi-sessionkey";
 
 sub load_save_sessionkey { # see get_session_key()
     my $key = shift;
@@ -201,22 +202,6 @@ sub lastfm {
     my ($method, @params) = @_;
     $method = lc($method);
 
-    my $cache = $cache;
-    if ($cache) {
-        unless (-d $cache) {
-            $cache = $cache_dir;
-            make_path($cache);
-        }
-        my $file = "$cache/".md5_hex(encode_json(\@_));
-        if (-f $file) {
-            my $data = loadfile($file);
-            return $data->{content}
-        }
-        else {
-            $cache = $file
-        }
-    }
-
     my %params;
     my $i = 0;
     while (my $p = shift @params) {
@@ -248,6 +233,23 @@ sub lastfm {
     sign(\%params);
 
     %last_params = %params;
+
+    my $cache = $cache;
+    if ( $cache ) {
+        unless ( -d $cache ) {
+            $cache = $cache_dir;
+            make_path( $cache );
+        }
+        my $cache_key_json = encode_json( [ map { $_, $params{$_} } sort keys %params ] );
+        my $file = "$cache/" . md5_hex( $cache_key_json );
+        if ( -f $file ) {
+            my $data = loadfile( $file );
+            return _rowify_content( $data->{content} );
+        }
+
+        $cache = $file;
+    }
+
     my $res;
     if ($methods->{$method}->{post}) {
         $res = $ua->post($url, Content => \%params);
@@ -260,47 +262,57 @@ sub lastfm {
 
     $params{format} ||= "xml";
     my $content = $res->decoded_content;
+    my $decoded_json = sub { $content = decode_json($content); };
     unless ($res->is_success &&
-        ($params{format} ne "xml" || $content =~ /<lfm status="ok">/)) {
-        EARORR:
-        $DB::single = 0;
-        $DB::single = 1;
-        my $consider = "";
-        if ($content =~ /Invalid session key - Please re-authenticate/) {
-            $consider = "setting NET_LASTFMAPI_REAUTH=1 to re-authenticate";
-        }
-        $consider .= ($consider ? "\n or " : "")."reading the docs: "
-            ."http://www.last.fm/api/show/?service=$methods->{$method}->{id}"
-            if $methods->{$method};
-        croak "Something went wrong:\n$content\n".
-            ($consider?"\nConsider $consider":"");
+        ($params{format} eq "json" && !exists($decoded_json->()->{error})
+        || $params{format} eq "xml" && $content =~ /<lfm status="ok">/)) {
+
+        my @clues;
+        if ($res->is_success) {
+            if ($res->decoded_content =~ /Invalid session key - Please re-authenticate/) {
+                push @clues, "Set NET_LASTFMAPI_REAUTH=1 to re-authenticate";
+            }
+            elsif ($methods->{$method}) {
+                push @clues, "Documentation for the '$method' method:\n"
+                    ."    http://www.last.fm/api/show/?service=$methods->{$method}->{id}"
+            }
         }
 
-    if ($params{format} eq "json") {
-        $content = decode_json($content);
-        if ($content->{error}) {
-            $content = Dump($content);
-            goto EARORR;
+        if (ref $content eq "HASH") {
+            $content = "Content translated JSON->YAML:\n".Dump($content);
         }
+        else {
+            $content = "Content:\n$content";
+        }
+
+        croak join("\n",
+            "Something went wrong.",
+            "HTTP Status: ".$res->status_line,
+            @clues,
+            "",
+            $content,
+            ""
+        );
     }
+
     if ($cache) {
         dumpfile($cache, {content => $content});
     }
     $last_response = $content;
-    if (wantarray) {
-        return extract_rows($content);
-    }
-    else {
-        return $content;
-    }
+    return _rowify_content( $content );
+}
+
+sub _rowify_content {
+    my ( $content ) = @_;
+    return extract_rows( $content ) if wantarray;
+    return $content;
 }
 
 sub extract_rows {
+    my ( $rs ) = @_;
     if (!$last_params{format}) {
         croak "returning rows from xml is not supported";
     }
-    my $rs = $last_response;
-    say Dump($rs);
     my @rk = keys %$rs;
     my $r = $rs->{$rk[0]};
     my @ks = sort keys %$r;
@@ -342,7 +354,6 @@ sub lastfm_iter {
     my $totalpages = $last_response_meta{totalPages};
     my $next_page = sub {
         return () if $page++ >= $totalpages;
-        say "page $page";
         my %params = %$params;
         $params{page} = $page;
         my $method = delete $params{method};
@@ -426,7 +437,7 @@ if ($ENV{NET_LASTFMAPI_REAUTH}) {
     get_session_key();
     say "Got session key: $session_key";
     say "Unsetting NET_LASTFMAPI_REAUTH...";
-    say delete $ENV{NET_LASTFMAPI_REAUTH};
+    delete $ENV{NET_LASTFMAPI_REAUTH};
     say "Done";
     exit;
 }
@@ -460,8 +471,8 @@ Net::LastFMAPI - LastFM API 2.0
   # paginated data can be iterated through per row
   my $iter = lastfm_iter("artist.getTopTracks", artist => "John Fahey");
   while (my $row = $iter->()) {
+      say $row->{playcount} .": ". $row->{name};
       my $whole_response = $Net::LastFMAPI::last_response;
-      say $row->{playcount} .": ". $row->name;
   }
 
   # wantarray? tries to extract the rows of data for you
@@ -480,44 +491,56 @@ Takes care of POSTing to write methods, doing authorisation when needed.
 
 Dies if something went obviously wrong.
 
-Can return xml if you like, defaults to returning perl data/requesting json.
-Not all methods support JSON. Beware of "@attr" and empty elements turned into
-whitespace strings instead of empty arrays, single elements turned into a hash
-instead of an array of one hash.
+Can return xml if you like, defaults to returning perl data (requesting json).
+Beware of "@attr" and empty elements turned into whitespace strings instead of
+empty arrays, single elements turned into a hash instead of an array of one hash.
 
-The below configurables can be set by k => v hash to C<lastfm_config> if you
-prefer.
+=head1 SESSION KEY AND AUTHORISATION
 
-=head1 THE SESSION KEY
+  lastfm_config(
+      session_key => $key,
+  );
 
-  $Net::LastFMAPI::session_key = "secret"
+The session key will be sought when an authorised request is needed. See L<CONFIG>.
 
-It will be sought when an authorised request is needed.
+If it is not configured or saves in a symlink then on-screen instructions should
+be followed to authorise in a web browser with whoever is logged in to L<last.fm>.
+See L<http://www.last.fm/api/desktopauth>.
 
-If it is not saved then on-screen instructions should be followed to authorise
-with whoever is logged in to L<last.fm>.
-
-It is saved in the symlink B<$ENV{HOME}/.net-lastfmapi-sessionkey>. This is
-probably fine.
+It is saved in the symlink B<File::HomeDir::my_home()/.net-lastfmapi-sessionkey>
+by default. This is probably fine.
 
 Consider altering the subroutines B<talk_authentication>, B<load_save_sessionkey>,
-or simply setting the B<$Net::LastFMAPI::session_key> before needing it.
-
-=head1 RETURN XML
-
-  $Net::LastFMAPI::xml = 1
-
-This will return an xml string to you. You can also set B<format =E<gt> "xml">
-for a particular request. Apparently, not all methods support JSON. For casual
-hacking, though, getting perl data is much more convenient.
+or simply configuring (see L<CONFIG>) before needing it.
 
 =head1 CACHING
 
-  $Net::LastFMAPI::cache = 1
+  lastfm_config(
+      # to enable caching
+      cache => 1,
+      # default:
+      cache_dir => File::HomeDir::my_home()."/.net-lastfmapi-cache/",
+  );
 
-  $Net::LastFMAPI::cache_dir = "$ENV{HOME}/.net-lastfmapi-cache/"
+Good for development.
 
-Does caching. Default cache directory is shown. Good for development.
+=head1 RETURNING ROWS
+
+  my @artists = lastfm("artist.getSimilar", ...);
+
+Call C<lastfm> in list context. Attempts to extract for you the rows inside the
+response. The whole response is in C<$Net::LastFMAPI::last_response>. See also
+L<PAGINATION>
+
+=head1 RETURN XML
+
+  lastfm_config(xml => 1);
+  # or
+  lastfm(..., format => "xml"):
+
+This will return an xml string to you. You can also set B<format =E<gt> "xml">
+for a particular request. Default format is JSON, as getting perl data is much
+from the C<lastfm> method is more casual.
 
 =head1 PAGINATION
 
@@ -528,6 +551,39 @@ Does caching. Default cache directory is shown. Good for development.
 
 Will attempt to extract rows from a response, passing you one at a time,
 keeping going into the next page, and the next...
+
+=head1 CONFIG
+
+  lastfm_config(
+      # associates the request with a user
+      # got with their permission initially
+      session_key => $key,
+
+      # these are explained elsewhere in this pod
+      xml => 1,
+      cache => 1,
+      cache_dir => $path,
+
+
+      # for your own api account see http://www.last.fm/api/account
+      # you can use this module's (default) api account fine
+      api_key => $your_api_key,
+      secret => $your_secret,
+
+      # LWP::UserAgent-sorta thing
+      ua => $ua,
+
+      # default File::HomeDir::my_home()/.net-lastfmapi-sessionkey
+      sk_symlink => $path,
+  );
+
+B<cache> and B<cache_dir> are likely most popular, see L<CACHING>.
+
+This module can handle the B<session_key> fine, see L<SESSION KEY AND AUTHORISATION>.
+
+B<api_key> and B<secret> are for representing this module on the page where the
+user authorises their account in the process of acquiring a new B<session_key>.
+You might want to have your own identity in there.
 
 =head1 SEE ALSO
 
