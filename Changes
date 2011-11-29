@@ -1,6 +1,6 @@
 Revision history for Perl extension Net::LastFMAPI.
 
-0.06 2011-11-29
+0.5 2011-11-29
 	- simpler date format in changelog
 	- use File::HomeDir instead of env var
 	- extract rows/lastfm_iter now works with cache (thanks Christian Walde)
