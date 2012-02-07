@@ -24,22 +24,22 @@ our $username; # not important
 our $xml = 0;
 our $cache = 0;
 our $cache_dir = my_home()."/.net-lastfmapi-cache/";
-our $sk_symlink = my_home()."/.net-lastfmapi-sessionkey";
+our $sk_savefile = my_home()."/.net-lastfmapi-sessionkey";
 
 sub load_save_sessionkey { # see get_session_key()
     my $key = shift;
     if ($key) {
-        symlink($key, $sk_symlink)
+        write_file($sk_savefile, $key);
     }
     else {
-        $key = readlink($sk_symlink);
+        $key = eval{ read_file($sk_savefile) };
     }
     $session_key = $key;
 }
 
 sub lastfm_config {
     my %configs = @_;
-    for my $k (qw{api_key secret session_key ua xml cache cache_dir sk_symlink}) {
+    for my $k (qw{api_key secret session_key ua xml cache cache_dir sk_savefile}) {
         my $v = delete $configs{$k};
         if (defined $v) {
             no strict 'refs';
@@ -262,6 +262,10 @@ sub lastfm {
 
     $params{format} ||= "xml";
     my $content = $res->decoded_content;
+    croak "Last.fm contains faulty data for a piece of data you requested and "
+      . "is unable to return a useful reply. Will be treated as an empty reply."
+      if $content eq qq|""\n|;
+
     my $decoded_json = sub { $content = decode_json($content); };
     unless ($res->is_success &&
         ($params{format} eq "json" && !exists($decoded_json->()->{error})
@@ -309,22 +313,20 @@ sub _rowify_content {
 }
 
 sub extract_rows {
-    my ( $rs ) = @_;
+    my ( $content ) = @_;
     if (!$last_params{format}) {
         croak "returning rows from xml is not supported";
     }
-    my @rk = keys %$rs;
-    my $r = $rs->{$rk[0]};
-    my @ks = sort keys %$r;
-    unless (@rk == 1 && @ks == 2 && $ks[0] eq '@attr') {
+    my @main_keys = keys %{$content};
+    my $main_data = $content->{$main_keys[0]};
+    my @data_keys = sort keys %{$main_data};
+    unless (@main_keys == 1 && @data_keys == 2 && $data_keys[0] eq '@attr') {
+        my ( $text, $total ) = ( $main_data->{'#text'}, $main_data->{total} );
+        return if defined $text && $text =~ /^\s+$/ && defined $total && $total == 0; # no rows
         carp "extracting rows may be broken";
-        if (defined $r->{'#text'} && $r->{'#text'} =~ /^\s+$/
-            && defined $r->{total} && $r->{total} == 0) { # no rows
-            return ();
-        };
     }
-    %last_response_meta = %{ $r->{$ks[0]} };
-    my $rows = $r->{$ks[1]};
+    %last_response_meta = %{ $main_data->{$data_keys[0]} };
+    my $rows = $main_data->{$data_keys[1]};
     if (ref $rows ne "ARRAY") {
         # schemaless translation of xml to data creates these cases
         if (ref $rows eq "HASH") { # 1 row
@@ -430,8 +432,8 @@ sub sign {
 
 if ($ENV{NET_LASTFMAPI_REAUTH}) {
     say "Re-authenticatinging...";
-    if (readlink($sk_symlink)) {
-        unlink($sk_symlink);
+    if (-e $sk_savefile) {
+        unlink($sk_savefile);
     }
     undef $session_key;
     get_session_key();
@@ -503,11 +505,11 @@ empty arrays, single elements turned into a hash instead of an array of one hash
 
 The session key will be sought when an authorised request is needed. See L<CONFIG>.
 
-If it is not configured or saves in a symlink then on-screen instructions should
-be followed to authorise in a web browser with whoever is logged in to L<last.fm>.
+If it is not configured or saved then on-screen instructions should be followed to
+authorise in a web browser with whoever is logged in to L<last.fm>.
 See L<http://www.last.fm/api/desktopauth>.
 
-It is saved in the symlink B<File::HomeDir::my_home()/.net-lastfmapi-sessionkey>
+It is saved in the file B<File::HomeDir::my_home()/.net-lastfmapi-sessionkey>
 by default. This is probably fine.
 
 Consider altering the subroutines B<talk_authentication>, B<load_save_sessionkey>,
@@ -574,7 +576,7 @@ keeping going into the next page, and the next...
       ua => $ua,
 
       # default File::HomeDir::my_home()/.net-lastfmapi-sessionkey
-      sk_symlink => $path,
+      sk_savefile => $path,
   );
 
 B<cache> and B<cache_dir> are likely most popular, see L<CACHING>.
@@ -606,4 +608,3 @@ Steev Eeeriumn <drsteve@cpan.org>
  This module is free software. It may be used, redistributed
 and/or modified under the terms of the Perl Artistic License
      (see http://www.perl.com/perl/misc/Artistic.html)
-
